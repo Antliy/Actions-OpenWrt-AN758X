@@ -926,6 +926,7 @@ jobs:
               CONFIG_PACKAGE_kmod-mt799b=y \
               CONFIG_PACKAGE_wifi-profile=y \
               CONFIG_PACKAGE_mtwifi-cfg-ucode=y \
+              CONFIG_PACKAGE_iwinfo-ucode=y \
               CONFIG_PACKAGE_mwctl=y \
               CONFIG_PACKAGE_airoha-en7581-mt7996-npu-firmware=y \
               CONFIG_MTK_HWIFI_MT7993=y \
@@ -935,6 +936,9 @@ jobs:
               CONFIG_MTK_WIFI7_CHIP_MT7993=y \
               CONFIG_MTK_WIFI7_OSAL_SUPPORT=y \
               CONFIG_MTK_WIFI7_CFG80211_SUPPORT=y \
+              CONFIG_MTK_WIFI7_MAP_SUPPORT=y \
+              CONFIG_MTK_WIFI7_DOT11K_RRM_SUPPORT=y \
+              CONFIG_MTK_WIFI7_DOT11R_FT_SUPPORT=y \
               CONFIG_DRIVER_11BE_SUPPORT=y \
               CONFIG_DRIVER_11AX_SUPPORT=y \
               CONFIG_DRIVER_11AC_SUPPORT=y ; do
@@ -968,6 +972,52 @@ jobs:
               exit 1
             fi
             echo "✅ mt76/mac80211 冲突包未启用"
+
+            # iwinfo 与 iwinfo-ucode 的互斥关系：后者 DEPENDS 里原本带
+            # "@!PACKAGE_iwinfo"，kconfig 在 PACKAGE_iwinfo=y 时会把
+            # iwinfo-ucode 整个丢掉（.packagedeps 里就没有它），但
+            # mtwifi-cfg-ucode 的 "+iwinfo-ucode" 照样写进 apk 的 depend，
+            # 编译全部通过、最后才在 package/install 报
+            #   iwinfo-ucode (no such package): required by mtwifi-cfg-ucode
+            # 这一步只花几分钟，比等一小时值得多。
+            if grep -q "^CONFIG_PACKAGE_iwinfo=y" .config; then
+              echo "::error::CONFIG_PACKAGE_iwinfo=y 与 iwinfo-ucode 互斥，会让 iwinfo-ucode 被静默剔除"
+              echo "::error::25.12 起 /usr/bin/iwinfo 由 wifi-scripts(files-ucode) 提供，iwinfo 包是空壳；"
+              echo "::error::请把 configs/fiberhome_an4475-g2-wifi7.config 里它改成 '# CONFIG_PACKAGE_iwinfo is not set'"
+              exit 1
+            fi
+            grep -q "^CONFIG_WIFI_SCRIPTS_UCODE=y" .config \
+              || echo "::warning::CONFIG_WIFI_SCRIPTS_UCODE 不是 y：/usr/bin/iwinfo 可能无人提供"
+            echo "✅ iwinfo 与 iwinfo-ucode 不冲突"
+
+            # wifi-profile 的 WIFI_SCRIPT_SUPPORT（默认 y）会装 /sbin/wifi
+            # （files/common/wifi_jedi）和 /lib/wifi/*.lua，那是 lua 版
+            # wifi_jedi + mtwifi-cfg 的组合；mtwifi-cfg-ucode 路线下 /sbin/wifi
+            # 必须归 wifi-scripts，否则 apk 装配时硬报：
+            #   ERROR: wifi-profile-1: trying to overwrite sbin/wifi
+            #          owned by wifi-scripts-1.0-r4
+            if grep -q "^CONFIG_WIFI_SCRIPT_SUPPORT=y" .config; then
+              echo "::error::CONFIG_WIFI_SCRIPT_SUPPORT=y 会让 wifi-profile 抢 /sbin/wifi（属于 wifi-scripts）"
+              echo "::error::请在 configs/fiberhome_an4475-g2-wifi7.config 里写"
+              echo "::error::  '# CONFIG_WIFI_SCRIPT_SUPPORT is not set'（wifi_jedi/lua 是 mtwifi-cfg 路线）"
+              exit 1
+            fi
+            echo "✅ /sbin/wifi 只由 wifi-scripts 提供"
+
+            # 板级 dts 里写错一个 label，dtc 会在 target/linux/install 阶段
+            # abort（那时内核已经编完，几十分钟）：
+            #   ERROR (phandle_references): /soc/pcie@1fc00000:
+            #   Reference to non-existent node or label "pcie0_pins"
+            # 这种错误纯文本就能查，用一个几十行的脚本提前到这一步。
+            DTS="target/linux/airoha/dts/an7581-fiberhome-an4475-g2.dts"
+            if [ -f "$DTS" ]; then
+              python3 "$GITHUB_WORKSPACE/scripts/check-dts-refs.py" "$DTS" || {
+                echo "::error::修 $DTS 里报出来的 &label 拼写，别等 65 分钟后的 dtc"
+                exit 1
+              }
+            else
+              echo "::warning::没找到 $DTS，跳过 DTS phandle 检查"
+            fi
           fi
 
           # 代理插件校验（只警告）：kconfig 只认 CONFIG_PACKAGE_x=y，
